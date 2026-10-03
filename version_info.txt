@@ -1,0 +1,30 @@
+# -*- coding: utf-8 -*-
+# PyInstaller 版本资源文件：打包时写进 exe 的属性里
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '080404b0',
+        [StringStruct('CompanyName', '大肥鱼'),
+         StringStruct('FileDescription', '大肥鱼dock栏'),
+         StringStruct('FileVersion', '1.0.0.0'),
+         StringStruct('InternalName', 'BigFishDock'),
+         StringStruct('LegalCopyright', 'WWQ'),
+         StringStruct('LegalTrademarks', '大肥鱼 WWQ'),
+         StringStruct('OriginalFilename', '大肥鱼dock栏.exe'),
+         StringStruct('ProductName', '大肥鱼dock栏'),
+         StringStruct('ProductVersion', '1.0.0.0')])
+    ]),
+    VarFileInfo([VarStruct('Translation', [2052, 1200])])
+  ]
+)
