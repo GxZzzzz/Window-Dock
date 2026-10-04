@@ -1,0 +1,49 @@
+{
+  "version": "v3",
+  "icons": {
+    "ide": "icons/ide.png",
+    "office": "icons/office.png",
+    "industrial": "icons/industrial.png",
+    "entertainment": "icons/entertainment.png",
+    "utilities": "icons/utilities.png",
+    "documents": "icons/documents.png",
+    "images": "icons/images.png",
+    "folders": "icons/folders.png",
+    "archives": "icons/archives.png",
+    "media": "icons/media.png",
+    "other": "icons/other.png",
+    "computer": "icons/computer.png",
+    "trash_empty": "icons/trash_empty.png",
+    "trash_full": "icons/trash_full.png",
+    "apps": "icons/apps.png",
+    "star": "icons/star.png"
+  },
+  "names": {
+    "ide": "IDE开发",
+    "office": "办公沟通",
+    "industrial": "工控调试",
+    "entertainment": "娱乐影音",
+    "utilities": "系统工具",
+    "documents": "文档",
+    "images": "图片",
+    "folders": "文件夹",
+    "archives": "压缩包",
+    "media": "音视频文件",
+    "other": "其他分类",
+    "computer": "此电脑",
+    "trash_empty": "空回收站",
+    "trash_full": "满回收站",
+    "apps": "通用应用",
+    "star": "收藏"
+  },
+  "aliases": {
+    "work": "office",
+    "code": "ide"
+  },
+  "canvas": 512,
+  "format": "RGBA PNG",
+  "color_profile": "embedded sRGB ICC",
+  "status": "accepted",
+  "style": "用户确认的 v3 微立体分类与系统入口图标",
+  "generation": "本地 ComfyUI SDXL；仅静态 PNG，无运行时生成依赖"
+}

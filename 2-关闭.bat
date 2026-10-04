@@ -1,8 +1,12 @@
 @echo off
-chcp 936 >nul
 setlocal
-set "PY=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
-if not exist "%PY%" set "PY=python.exe"
-"%PY%" "%~dp0dock.py" --stop
-timeout /t 2 >nul
-endlocal
+cd /d "%~dp0"
+if exist "dist\WindowDock\WindowDock.exe" (
+    "dist\WindowDock\WindowDock.exe" --stop
+    exit /b
+)
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" dock.py --stop
+    exit /b
+)
+python dock.py --stop
