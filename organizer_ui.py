@@ -1,39 +1,30 @@
 # -*- coding: utf-8 -*-
 """Dock 分类面板和规则编辑器；所有操作只改变虚拟归属。"""
 
-import copy
 import os
-import uuid
 from collections import OrderedDict
 
 from PyQt5.QtCore import (QAbstractListModel, QEasingCurve, QEvent, QFileInfo, QItemSelectionModel, QMimeData, QObject,
                           QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, QThread,
                           pyqtSignal, pyqtSlot)
-from PyQt5.QtGui import (QColor, QContextMenuEvent, QDrag, QFont, QIcon, QImage, QLinearGradient, QRadialGradient,
+from PyQt5.QtGui import (QColor, QContextMenuEvent, QDrag, QIcon, QImage, QLinearGradient,
                          QPainter, QPainterPath, QPen, QPixmap)
-from PyQt5.QtWidgets import (QAbstractItemView, QActionGroup, QApplication, QCheckBox,
-                             QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+from PyQt5.QtWidgets import (QAbstractItemView, QActionGroup, QApplication,
                              QFileIconProvider, QFrame, QHBoxLayout, QLabel,
-                             QLineEdit, QListView, QListWidget, QListWidgetItem,
-                             QMessageBox, QPushButton, QScrollArea,
-                             QSizePolicy, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
+                             QListView, QSizePolicy, QStyle, QStyledItemDelegate,
                              QVBoxLayout, QWidget)
 
 try:
-    from organizer import normalize_path, separator_positions
+    from organizer import normalize_path
 except ImportError:
     def normalize_path(path):
         return os.path.normcase(os.path.abspath(os.fspath(path)))
 
 
-KINDS = [("apps", "应用与快捷方式"), ("documents", "文档"),
-         ("images", "图片"), ("folders", "文件夹"), ("archives", "压缩包"),
-         ("media", "音频与视频"), ("other", "其他文件")]
-ICONS = [("ide", "IDE 开发"), ("office", "办公沟通"), ("industrial", "工控调试"),
-         ("entertainment", "娱乐影音"), ("utilities", "系统工具")] + KINDS + [
-         ("work", "工作"), ("code", "开发"), ("star", "收藏")]
-FIELDS = [("kind", "文件类型"), ("extension", "扩展名"),
-          ("name", "名称包含"), ("path", "路径包含"), ("exact", "指定文件或应用")]
+# 管理窗口独立维护，保留 Dock 已有的导入入口。
+from category_manager import CategoryManager
+
+
 UNCATEGORIZED = "__uncategorized__"
 _ENTRY_IMAGE_LOADER = None
 
@@ -292,13 +283,6 @@ class _EntryDelegate(QStyledItemDelegate):
         for offset, line in enumerate(lines):
             painter.drawText(QRect(box.left() + 5, box.top() + 69 + offset * 17,
                                    width, 18), Qt.AlignHCenter | Qt.AlignTop, line)
-        if index.data(Qt.UserRole + 1):
-            painter.setPen(QColor("#697990" if self.light else "#bdc9df"))
-            font = painter.font()
-            font.setPixelSize(10)
-            painter.setFont(font)
-            painter.drawText(QRect(box.left(), box.top() + 106, box.width(), 12),
-                             Qt.AlignCenter, "手动")
         painter.restore()
 
     def _paint_list(self, painter, option, index):
@@ -807,331 +791,3 @@ class CategoryPanel(QWidget):
         self.status.setVisible(bool(message))
         if self.isVisible():
             self._place()
-
-
-class _RuleRow(QWidget):
-    removed = pyqtSignal(object)
-
-    def __init__(self, rule=None, parent=None):
-        super().__init__(parent)
-        rule = rule or {"field": "kind", "value": "documents"}
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(7)
-        self.field = QComboBox()
-        for key, label in FIELDS:
-            self.field.addItem(label, key)
-        self.field.setFixedWidth(133)
-        row.addWidget(self.field)
-        self.text = QLineEdit()
-        row.addWidget(self.text, 1)
-        self.kind = QComboBox()
-        for key, label in KINDS:
-            self.kind.addItem(label, key)
-        row.addWidget(self.kind, 1)
-        self.browse = QPushButton("选择…")
-        self.browse.clicked.connect(self._choose)
-        row.addWidget(self.browse)
-        remove = QPushButton("×")
-        remove.setFixedWidth(34)
-        remove.setToolTip("删除这条规则")
-        remove.clicked.connect(lambda: self.removed.emit(self))
-        row.addWidget(remove)
-        self.field.setCurrentIndex(max(0, self.field.findData(rule.get("field", "kind"))))
-        self.text.setText(str(rule.get("value", "")))
-        kind_index = self.kind.findData(rule.get("value", "documents"))
-        if kind_index < 0:
-            self.kind.addItem("多个类型：" + str(rule.get("value", "")), rule.get("value", ""))
-            kind_index = self.kind.count() - 1
-        self.kind.setCurrentIndex(kind_index)
-        self.field.currentIndexChanged.connect(self._field_changed)
-        self._field_changed()
-
-    def _field_changed(self):
-        field = self.field.currentData()
-        self.kind.setVisible(field == "kind")
-        self.text.setVisible(field != "kind")
-        self.browse.setVisible(field == "exact")
-        hints = {"extension": "例如 .pdf, .docx（任意一个扩展名）",
-                 "name": "例如 项目, 合同（包含任意关键词）",
-                 "path": "例如 工作资料, 项目（包含任意关键词）",
-                 "exact": "选择具体应用或文件，或填写完整路径"}
-        self.text.setPlaceholderText(hints.get(field, ""))
-
-    def _choose(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "选择要匹配的文件或应用")
-        if paths:
-            self.text.setText(", ".join(paths))
-
-    def value(self):
-        field = self.field.currentData()
-        return {"field": field, "value": self.kind.currentData() if field == "kind" else self.text.text().strip()}
-
-
-class CategoryManager(QDialog):
-    """表单的修改只在点击保存后提交，取消不会改变服务状态。"""
-    def __init__(self, service, light=True, parent=None, dock_config=None):
-        super().__init__(parent)
-        self.setObjectName("categoryManager")
-        self.setWindowTitle("管理分类与分隔符 · Window Dock")
-        self.resize(890, 620)
-        self.setMinimumSize(720, 480)
-        self.service = service
-        self.light = light
-        self.dock_config = dock_config
-        self.categories = copy.deepcopy(service.state.get("categories", []))
-        self.separators = separator_positions(service.state)
-        self.current_id = None
-        self.rule_rows = []
-        self.setStyleSheet(_stylesheet(light))
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
-        heading = QLabel("让每个分类，按你的习惯整理")
-        heading.setStyleSheet("font-size: 20px; font-weight: 600;")
-        layout.addWidget(heading)
-        note = QLabel("拖动左侧分类调整优先级，靠前的分类先匹配；拖动分隔符划分 Dock 区域。点击保存后生效。")
-        note.setProperty("muted", True)
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        split = QSplitter(Qt.Horizontal)
-        layout.addWidget(split, 1)
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 8, 12, 0)
-        self.list = QListWidget()
-        self.list.setIconSize(QSize(31, 31))
-        self.list.setTextElideMode(Qt.ElideMiddle)
-        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.list.setUniformItemSizes(False)
-        self.list.setDragDropMode(QAbstractItemView.InternalMove)
-        self.list.setDefaultDropAction(Qt.MoveAction)
-        self.list.currentItemChanged.connect(self._switch)
-        left_layout.addWidget(self.list, 1)
-        buttons = QHBoxLayout()
-        add = QPushButton("新建分类")
-        add.clicked.connect(self._add)
-        buttons.addWidget(add)
-        self.delete_button = QPushButton("删除")
-        self.delete_button.clicked.connect(self._delete)
-        buttons.addWidget(self.delete_button)
-        left_layout.addLayout(buttons)
-        self.add_separator_button = QPushButton("＋ 添加分隔符")
-        self.add_separator_button.setToolTip("在所选分类后添加；已有分隔符时选中它，便于拖动")
-        self.add_separator_button.clicked.connect(self._add_separator)
-        left_layout.addWidget(self.add_separator_button)
-        split.addWidget(left)
-        self.form = QWidget()
-        form = QVBoxLayout(self.form)
-        form.setContentsMargins(15, 8, 0, 0)
-        form.setSpacing(12)
-        form.addWidget(QLabel("分类名称"))
-        self.name = QLineEdit()
-        self.name.setPlaceholderText("例如 办公、开发工具、工作资料")
-        form.addWidget(self.name)
-        self.name.textChanged.connect(self._name_changed)
-        label_row = QHBoxLayout()
-        label_row.addWidget(QLabel("分类图标"))
-        label_row.addStretch()
-        self.icon = QComboBox()
-        self.icon.setIconSize(QSize(26, 26))
-        for key, label in ICONS:
-            self.icon.addItem(QIcon(category_pixmap(key, 26, light)), label, key)
-        label_row.addWidget(self.icon, 1)
-        form.addLayout(label_row)
-        rule_label = QHBoxLayout()
-        rules_title = QLabel("自动筛选规则")
-        rules_title.setStyleSheet("font-weight: 600;")
-        rule_label.addWidget(rules_title)
-        rule_label.addStretch()
-        self.mode = QComboBox()
-        self.mode.addItem("满足任意一条", "any")
-        self.mode.addItem("满足全部条件", "all")
-        rule_label.addWidget(self.mode)
-        form.addLayout(rule_label)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self.rules_widget = QWidget()
-        self.rules_widget.setStyleSheet("background: transparent;")
-        self.rules_layout = QVBoxLayout(self.rules_widget)
-        self.rules_layout.setContentsMargins(0, 0, 0, 0)
-        self.rules_layout.setAlignment(Qt.AlignTop)
-        scroll.setWidget(self.rules_widget)
-        form.addWidget(scroll, 1)
-        add_rule = QPushButton("＋ 添加规则")
-        add_rule.clicked.connect(lambda: self._append_rule())
-        form.addWidget(add_rule)
-        help_text = QLabel("没有规则的分类只接收手动拖入。关键词或扩展名可用逗号分隔；同一条规则内匹配任意一个值。")
-        help_text.setProperty("muted", True)
-        help_text.setWordWrap(True)
-        form.addWidget(help_text)
-        self.editor_stack = QStackedWidget()
-        self.editor_stack.addWidget(self.form)
-        separator_help = QLabel("分隔符只用于划分 Dock\n\n拖动左侧这行到想要划区的位置，\n也可以点“删除”移除分隔符。\n\n分隔符不参与分类规则匹配。\n放在列表开头可分开固定入口与分类；\n两边都有图标时才显示。")
-        separator_help.setAlignment(Qt.AlignCenter)
-        separator_help.setWordWrap(True)
-        self.editor_stack.addWidget(separator_help)
-        split.addWidget(self.editor_stack)
-        split.setSizes([225, 600])
-        self.split_background = QCheckBox("分隔符同时划开玻璃背景")
-        self.split_background.setChecked(bool(dock_config.get("sep_split", True)) if dock_config is not None else True)
-        self.split_background.setToolTip("关闭时只显示竖线，玻璃背景保持连贯")
-        self.split_background.setVisible(dock_config is not None)
-        layout.addWidget(self.split_background)
-        self.restore_excluded = QCheckBox("保存时恢复已移除的 %d 个入口" % len(service.state.get("excluded", [])))
-        self.restore_excluded.setVisible(bool(service.state.get("excluded", [])))
-        self.restore_excluded.setToolTip("取消排除，让这些入口重新按当前规则分类；不会移动原文件")
-        layout.addWidget(self.restore_excluded)
-        footer = QDialogButtonBox()
-        save = footer.addButton("保存设置", QDialogButtonBox.AcceptRole)
-        save.setProperty("primary", True)
-        footer.addButton("取消", QDialogButtonBox.RejectRole)
-        footer.accepted.connect(self._save)
-        footer.rejected.connect(self.reject)
-        layout.addWidget(footer)
-        self._populate()
-        if self.list.count():
-            self.list.setCurrentRow(0)
-        else:
-            self.form.setEnabled(False)
-            self.delete_button.setEnabled(False)
-        screen = QApplication.screenAt(self.pos()) or QApplication.primaryScreen()
-        available = screen.availableGeometry()
-        self.setMinimumSize(min(720, available.width() - 24), min(480, available.height() - 24))
-        self.resize(min(890, available.width() - 24), min(620, available.height() - 24))
-
-    def _populate(self):
-        self.list.blockSignals(True)
-        self.list.clear()
-        if "__before_categories__" in self.separators:
-            self.list.addItem(self._separator_item())
-        for category in self.categories:
-            item = QListWidgetItem(QIcon(category_pixmap(category.get("icon", "folders"), 31, self.light)), category["name"])
-            item.setData(Qt.UserRole, category["id"])
-            item.setToolTip(category["name"])
-            self.list.addItem(item)
-            if category["id"] in self.separators:
-                self.list.addItem(self._separator_item())
-        self.list.blockSignals(False)
-
-    @staticmethod
-    def _separator_item():
-        item = QListWidgetItem("── 分隔符 ──")
-        item.setData(Qt.UserRole, "__separator__")
-        item.setToolTip("拖动改变 Dock 划区位置；分隔符不参与分类规则")
-        item.setTextAlignment(Qt.AlignCenter)
-        item.setSizeHint(QSize(0, 39))
-        return item
-
-    def _add_separator(self):
-        self._stash()
-        row = self.list.currentRow() + 1 if self.list.currentRow() >= 0 else self.list.count()
-        if self.current_id == "__separator__" and row < self.list.count():
-            row += 1
-        for neighbor in (row - 1, row):
-            item = self.list.item(neighbor)
-            if item is not None and item.data(Qt.UserRole) == "__separator__":
-                self.list.setCurrentItem(item)
-                return
-        item = self._separator_item()
-        self.list.insertItem(row, item)
-        self.list.setCurrentItem(item)
-
-    def _category(self, category_id):
-        return next((c for c in self.categories if c["id"] == category_id), None)
-
-    def _stash(self):
-        category = self._category(self.current_id)
-        if category is None:
-            return
-        category["name"] = self.name.text().strip() or "未命名分类"
-        category["icon"] = self.icon.currentData()
-        category["mode"] = self.mode.currentData()
-        category["rules"] = [r.value() for r in self.rule_rows if r.value()["value"]]
-
-    def _switch(self, current, previous):
-        self._stash()
-        self.current_id = current.data(Qt.UserRole) if current else None
-        category = self._category(self.current_id)
-        self.form.setEnabled(category is not None)
-        self.editor_stack.setCurrentIndex(0 if category is not None else 1)
-        self.delete_button.setEnabled(category is not None or self.current_id == "__separator__")
-        if category is None:
-            return
-        self.name.blockSignals(True)
-        self.name.setText(category["name"])
-        self.name.blockSignals(False)
-        ix = self.icon.findData(category.get("icon", "folders"))
-        self.icon.setCurrentIndex(max(0, ix))
-        self.mode.setCurrentIndex(max(0, self.mode.findData(category.get("mode", "any"))))
-        for row in list(self.rule_rows):
-            self._remove_rule(row)
-        for rule in category.get("rules", []):
-            self._append_rule(rule)
-
-    def _name_changed(self, text):
-        item = self.list.currentItem()
-        if item and item.data(Qt.UserRole) != "__separator__":
-            item.setText(text.strip() or "未命名分类")
-            item.setToolTip(text.strip() or "未命名分类")
-
-    def _append_rule(self, rule=None):
-        row = _RuleRow(rule, self.rules_widget)
-        row.removed.connect(self._remove_rule)
-        self.rule_rows.append(row)
-        self.rules_layout.addWidget(row)
-
-    def _remove_rule(self, row):
-        self.rules_layout.removeWidget(row)
-        self.rule_rows.remove(row)
-        row.deleteLater()
-
-    def _add(self):
-        self._stash()
-        category = {"id": uuid.uuid4().hex, "name": "新分类", "icon": "folders", "mode": "any", "rules": []}
-        self.categories.append(category)
-        item = QListWidgetItem(QIcon(category_pixmap("folders", 31, self.light)), category["name"])
-        item.setData(Qt.UserRole, category["id"])
-        item.setToolTip(category["name"])
-        self.list.addItem(item)
-        self.list.setCurrentItem(item)
-        self.name.setFocus()
-        self.name.selectAll()
-
-    def _delete(self):
-        if self.current_id == "__separator__":
-            self.current_id = None
-            item = self.list.takeItem(self.list.currentRow())
-            del item
-            return
-        category = self._category(self.current_id)
-        if category is None:
-            return
-        answer = QMessageBox.question(self, "删除分类", "删除“%s”？\n其中的项目将重新参与自动分类，真实文件不会被删除。\n点击保存后才会生效。" % category["name"],
-                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
-            return
-        self.categories.remove(category)
-        self.current_id = None
-        item = self.list.takeItem(self.list.currentRow())
-        del item
-        if not self.list.count():
-            self.form.setEnabled(False)
-            self.delete_button.setEnabled(False)
-
-    def _save(self):
-        self._stash()
-        ordered, separators = [], []
-        anchor = "__before_categories__"
-        for row in range(self.list.count()):
-            key = self.list.item(row).data(Qt.UserRole)
-            if key == "__separator__":
-                separators.append(anchor)
-            else:
-                ordered.append(self._category(key))
-                anchor = key
-        if self.dock_config is not None:
-            self.dock_config["sep_split"] = self.split_background.isChecked()
-        self.service.update_categories(ordered, separators)
-        if self.restore_excluded.isChecked():
-            self.service.restore_auto(list(self.service.state.get("excluded", [])))
-        self.accept()

@@ -8,8 +8,8 @@ Window Dock —— Windows 玻璃 Dock 与桌面虚拟分类
   * macOS 风格鼠标放大（鱼眼）效果，点击有回弹动画
   * 托盘与右键菜单管理，支持固定入口、分类规则和手动拖入
   * 一键设置开机自启动（写入注册表 HKCU Run）
-  * 配置文件：%APPDATA%\\BigFishDock\\config.json
-  * 日志文件：%APPDATA%\\BigFishDock\\dock.log
+  * 配置文件：%USERPROFILE%\\.BigFishDock\\config.json
+  * 日志文件：%USERPROFILE%\\.BigFishDock\\dock.log
 
 调试：命令行运行  python dock.py --preview 预览.png  可以导出一张预览图
      命令行运行  python dock.py --reset          清空所有已固定的图标
@@ -37,7 +37,7 @@ from desktop_visibility import icons_visible, set_icons_visible
 APP_NAME = "BigFishDock"            # 配置目录名 + 注册表自启动项名
 APP_TITLE = "大肥鱼dock栏"           # 显示给用户看的名字
 MAIN_WINDOW_MARKER = "BigFishDock.MainDock"
-VERSION = "1.1.26"
+VERSION = "1.1.36"
 LEGACY_APP_NAME = "LiquidGlassDock"  # 旧名字，用来迁移配置和清理旧自启动项
 
 # 打包成 exe 之后（PyInstaller），__file__ 指向临时解包目录，不能用；
@@ -49,9 +49,12 @@ if IS_FROZEN:
 else:
     SCRIPT_PATH = os.path.abspath(__file__)
     APP_DIR = os.path.dirname(SCRIPT_PATH)
-CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
+# MSIX 宿主启动的子进程可能重定向 AppData，导致手动启动与登录启动各用一份配置。
+# 用户主目录下的独立目录不参与 AppData 重定向，也不会随程序更新被替换。
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), "." + APP_NAME)
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 LOG_PATH = os.path.join(CONFIG_DIR, "dock.log")
+APPDATA_CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
 LEGACY_CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), LEGACY_APP_NAME)
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -256,20 +259,25 @@ sys.excepthook = _excepthook
 # 配置读写
 # ----------------------------------------------------------------------------
 def migrate_legacy():
-    """仅复制旧配置，启动时不擅自移除另一个版本的自启动设置。"""
+    """新位置首次使用时复制旧配置；保留原件，不覆盖已经迁移或修改过的配置。"""
+    if os.path.exists(CONFIG_PATH):
+        return
     try:
-        if (not os.path.exists(CONFIG_PATH)) and os.path.isdir(LEGACY_CONFIG_DIR):
-            old = os.path.join(LEGACY_CONFIG_DIR, "config.json")
+        for directory in (APPDATA_CONFIG_DIR, LEGACY_CONFIG_DIR):
+            old = os.path.join(directory, "config.json")
             if os.path.exists(old):
-                if not os.path.isdir(CONFIG_DIR):
-                    os.makedirs(CONFIG_DIR, exist_ok=True)
-                shutil.copy2(old, CONFIG_PATH)
+                os.makedirs(CONFIG_DIR, exist_ok=True)
+                tmp = CONFIG_PATH + ".migrate"
+                shutil.copy2(old, tmp)
+                os.replace(tmp, CONFIG_PATH)
                 log("已从旧目录迁移配置: " + old)
+                return
     except Exception:
         log("迁移配置失败: " + traceback.format_exc())
 
 
 def load_config():
+    migrate_legacy()
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -687,6 +695,7 @@ from organizer_ui import CategoryPanel, CategoryManager, set_entry_image_loader,
 from organizer_artwork import category_pixmap, set_native_icons
 from menu_ui import ThemedMenu
 from trash_artwork import trash_pixmap, computer_pixmap
+from dock_search import DockSearch
 
 # Qt 5 的安装路径探测在中文虚拟环境中可能损坏，显式保留 Unicode 插件路径。
 _qt_platforms = os.path.join(os.path.dirname(PyQt5.__file__), "Qt5", "plugins", "platforms")
@@ -905,6 +914,7 @@ class Dock(QWidget):
         self.recycle_bin = None
         self.category_panel = None
         self.category_manager = None
+        self.search_bar = None
         self._drop_index = -1
         self.setAcceptDrops(True)
 
@@ -1068,6 +1078,8 @@ class Dock(QWidget):
         cur = system_is_light()
         if cur != self._sys_light:
             self._sys_light = cur
+            if self.search_bar:
+                self.search_bar.update_theme()
             self.update()
 
     # ---------------- 尺寸与布局 ----------------
@@ -1278,8 +1290,8 @@ class Dock(QWidget):
             categories.append({"id": "__uncategorized__", "name": "未分类", "icon": "other"})
             separators = separator_positions(self.organizer.state)
             screen = self.screen() or QApplication.primaryScreen()
-            available = (screen.availableGeometry().height() if self.is_vertical()
-                         else screen.availableGeometry().width()) if screen else 1920
+            available = ((screen.availableGeometry().height() if self.is_vertical()
+                          else screen.availableGeometry().width()) if screen else 1920) - self.search_extent(expanded=True)
             separator_width = self.sep_gap_width() if self.cfg.get("sep_split", True) else self.sep_width()
             system_room = self.icon_size * 2.7 + self.sep_gap_width() + self.icon_size * self.gap_ratio
             slots = max(2, int((available - 100 - system_room) / (self.icon_size * 1.35)) - len(self.items))
@@ -1548,6 +1560,29 @@ class Dock(QWidget):
             x += width + gap
 
     # ---------------- 位置 ----------------
+    def search_extent(self, expanded=False):
+        if self.organizer is None:
+            return 0
+        return int(round((220 if expanded and not self.is_vertical() else 40) * self.ui_mult)) + 12
+
+    def sync_search_geometry(self):
+        if self.search_bar is None:
+            return
+        width = int(round(40 * self.ui_mult))
+        height = int(round(40 * self.ui_mult))
+        bar = self.window_rect(QRectF(self.side_room(), self.head_room(),
+                                     self.axis_length() - 2 * self.side_room(), self.bar_h())).toAlignedRect()
+        area = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        if self.is_vertical():
+            x = self.x() + bar.center().x() - width // 2
+            y = self.y() - height - 12
+        else:
+            x = self.x() + self.width() + 12
+            y = self.y() + bar.center().y() - height // 2
+        x = max(area.left() + 6, min(x, area.right() + 1 - width - 6))
+        y = max(area.top() + 6, min(y, area.bottom() + 1 - height - 6))
+        self.search_bar.set_anchor(QRect(x, y, width, height))
+
     def layout_position(self):
         """返回玻璃靠屏幕边的侧向位置，并决定放大朝哪一侧。"""
         scr = QGuiApplication.primaryScreen()
@@ -1578,9 +1613,11 @@ class Dock(QWidget):
         bar_top, geo = self.layout_position()
         if self.is_vertical():
             x = bar_top - self.head_room()
-            y = geo.top() + (geo.height() - self.height()) // 2
+            y = geo.top() + (geo.height() - self.height() + self.search_extent()) // 2
             return QPoint(int(x), int(y))
-        x = geo.left() + (geo.width() - self.width()) // 2
+        x = geo.left() + (geo.width() - self.width() - self.search_extent()) // 2
+        # 提前留出搜索展开的空间，点击时主 Dock 不移动，也不重算鱼眼布局。
+        x = min(x, geo.right() + 1 - self.width() - self.search_extent(expanded=True) - 8)
         y = bar_top - self.head_room()
         return QPoint(int(x), int(y))
 
@@ -1599,7 +1636,11 @@ class Dock(QWidget):
         self.tgt = []
         self._recalc(uniform=True)
 
+        self.sync_search_geometry()
+
     def set_position(self, mode):
+        if self.search_bar:
+            self.search_bar.collapse(animate=False)
         if self.category_panel:
             self.category_panel.hide()
         self.cfg["position"] = mode
@@ -1640,6 +1681,9 @@ class Dock(QWidget):
         """
         if self.preview or not self.isVisible():
             return
+        if self.search_bar and (self.search_bar.expanded or self.search_bar._reveal > 0):
+            # 输入期间保持搜索窗口的焦点和层级，收起后再恢复置底策略。
+            return
         try:
             user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND,
                                             ctypes.c_int, ctypes.c_int,
@@ -1650,6 +1694,9 @@ class Dock(QWidget):
             target = HWND_TOPMOST if layer == "top" else HWND_BOTTOM
             user32.SetWindowPos(hwnd, wintypes.HWND(target), 0, 0, 0, 0,
                                 SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+            if self.search_bar and self.search_bar.isVisible() and not self.search_bar.expanded:
+                user32.SetWindowPos(wintypes.HWND(int(self.search_bar.winId())), wintypes.HWND(target),
+                                    0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
         except Exception:
             log("apply_layer 失败: " + traceback.format_exc())
 
@@ -1674,6 +1721,7 @@ class Dock(QWidget):
         self.apply_theme_follow()
         self.apply_layer()
         if changed or moved or self.label_below != was_below:
+            self.sync_search_geometry()
             self.refresh_backdrop()
 
     # ---------------- 运行状态 ----------------
@@ -2096,6 +2144,7 @@ class Dock(QWidget):
         self.organizer = OrganizerService(self.cfg["organizer"], lambda: save_config(self.cfg), self, directories)
         self.category_panel = CategoryPanel(self.organizer, self.launch, self.pin_path, self.is_light(),
                                             menu_theme=self.theme_colors)
+        self.search_bar = DockSearch(self)
         self.organizer.changed.connect(self._organizer_changed)
         self.organizer.error.connect(lambda message: self.organizer_message("整理提示", message))
         self.organizer.completed.connect(lambda count: self.organizer_message("整理完成", "已分类 %d 个项目，原文件位置保持不变。" % count))
@@ -2103,6 +2152,8 @@ class Dock(QWidget):
         self._build_items()
         self.reposition()
         self.organizer.start()
+        if self.isVisible():
+            self.search_bar.show()
 
     def _organizer_changed(self):
         # 只更新分类入口，避免文件变化时重取独立应用图标。
@@ -2153,6 +2204,8 @@ class Dock(QWidget):
             self.reload()
 
     def open_category(self, cid):
+        if self.search_bar:
+            self.search_bar.collapse()
         if self.organizer is None:
             return
         if cid == "__more__":
@@ -2183,6 +2236,8 @@ class Dock(QWidget):
                                           dock_edge=self.cfg.get("position", "bottom"))
 
     def manage_categories(self):
+        if self.search_bar:
+            self.search_bar.collapse()
         if self.category_panel:
             self.category_panel.hide()
         self.category_manager = CategoryManager(self.organizer, self.is_light(), self, dock_config=self.cfg)
@@ -2703,6 +2758,9 @@ class Dock(QWidget):
         user32.SetPropW.restype = wintypes.BOOL
         user32.SetPropW(int(self.winId()), MAIN_WINDOW_MARKER, 1)
         super(Dock, self).showEvent(e)
+        if self.search_bar:
+            self.sync_search_geometry()
+            self.search_bar.show()
         if not self.preview:
             self.geo_timer.start()
             self.refresh_running()
@@ -2710,6 +2768,8 @@ class Dock(QWidget):
         QTimer.singleShot(60, self.apply_layer)
 
     def hideEvent(self, e):
+        if self.search_bar:
+            self.search_bar.hide()
         if self.category_panel:
             self.category_panel.hide()
         self.blur_timer.stop()
@@ -2734,6 +2794,9 @@ class Dock(QWidget):
         super(Dock, self).closeEvent(e)
 
     def reload(self):
+        if self.search_bar:
+            self.search_bar.collapse(animate=False)
+            self.search_bar.invalidate()
         self.base_icon = int(self.cfg["icon_size"])
         self.ui_mult = self._ui_mult()
         self.icon_size = self._scaled(self.base_icon)
@@ -2745,6 +2808,8 @@ class Dock(QWidget):
         self._exe_cache.clear()
         self._build_items()
         self.reposition()
+        if self.search_bar:
+            self.search_bar.update_theme()
         self.start_backdrop()
         self._kick()
 
@@ -3370,8 +3435,8 @@ def main():
         QMessageBox.information(None, APP_TITLE, T("Dock 已经在运行了（请看右下角托盘）。"))
         return 0
 
-    migrate_legacy()          # 从旧名字复制配置，保留旧版设置
     cfg = load_config()
+    log("配置文件: " + CONFIG_PATH)
     set_lang(cfg.get("lang", "zh"))
 
     dock = Dock(cfg)

@@ -16,15 +16,22 @@ def _theme():
     if not folder.is_dir() and getattr(sys, "frozen", False):
         folder = Path(sys._MEIPASS) / "assets" / "icons" / "ios-category-v2"
     try:
-        return folder, json.loads((folder / "manifest.json").read_text(encoding="utf-8-sig"))["icons"]
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8-sig"))
+        return folder, manifest["icons"], manifest.get("names", {})
     except (OSError, ValueError, KeyError):
-        return folder, {}
+        return folder, {}, {}
+
+
+def icon_choices():
+    """选择器复用资源清单，不扫描图片目录，也不预先解码图标。"""
+    _, icons, names = _theme()
+    return [(key, names.get(key, key)) for key in icons]
 
 
 @lru_cache(maxsize=96)
 def themed_icon(key, size):
     key = {"code": "ide", "work": "office"}.get(key, key)
-    folder, icons = _theme()
+    folder, icons, _ = _theme()
     relative = icons.get(key)
     if not relative:
         return None

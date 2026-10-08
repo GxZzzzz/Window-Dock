@@ -2,8 +2,8 @@
 # PyInstaller 版本资源文件：打包时写进 exe 的属性里
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 1, 26, 0),
-    prodvers=(1, 1, 26, 0),
+    filevers=(1, 1, 36, 0),
+    prodvers=(1, 1, 36, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,13 +17,13 @@ VSVersionInfo(
         '080404b0',
         [StringStruct('CompanyName', '大肥鱼'),
          StringStruct('FileDescription', 'Window Dock 桌面虚拟分类'),
-         StringStruct('FileVersion', '1.1.26.0'),
+         StringStruct('FileVersion', '1.1.36.0'),
          StringStruct('InternalName', 'WindowDock'),
          StringStruct('LegalCopyright', 'WWQ'),
          StringStruct('LegalTrademarks', '大肥鱼 WWQ'),
          StringStruct('OriginalFilename', 'WindowDock.exe'),
          StringStruct('ProductName', 'Window Dock'),
-         StringStruct('ProductVersion', '1.1.26.0')])
+         StringStruct('ProductVersion', '1.1.36.0')])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])
   ]
