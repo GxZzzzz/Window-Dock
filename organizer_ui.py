@@ -4,10 +4,10 @@
 import os
 from collections import OrderedDict
 
-from PyQt5.QtCore import (QAbstractListModel, QEasingCurve, QEvent, QFileInfo, QItemSelectionModel, QMimeData, QObject,
+from PyQt5.QtCore import (QAbstractListModel, QEasingCurve, QEvent, QFileInfo, QItemSelectionModel, QObject,
                           QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, QThread,
-                          pyqtSignal, pyqtSlot)
-from PyQt5.QtGui import (QColor, QContextMenuEvent, QDrag, QIcon, QImage, QKeySequence, QLinearGradient,
+                          QTimer, pyqtSignal, pyqtSlot)
+from PyQt5.QtGui import (QColor, QContextMenuEvent, QIcon, QImage, QKeySequence, QLinearGradient,
                          QPainter, QPainterPath, QPen, QPixmap)
 from PyQt5.QtWidgets import (QAbstractItemView, QActionGroup, QApplication,
                              QFileIconProvider, QFrame, QHBoxLayout, QLabel,
@@ -23,6 +23,7 @@ except ImportError:
 
 # 管理窗口独立维护，保留 Dock 已有的导入入口。
 from category_manager import CategoryManager
+from entry_drag import EntryDrag
 
 
 UNCATEGORIZED = "__uncategorized__"
@@ -308,11 +309,19 @@ class _EntryDelegate(QStyledItemDelegate):
 
 class _EntryView(QListView):
     pathsDropped = pyqtSignal(list)
+    dragRequested = pyqtSignal(list, QPixmap, QPoint)
     itemContextMenuRequested = pyqtSignal(QPoint)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.can_drop = True
+        self._press_position = None
+        self._insert_row = None
+        self._drag_position = QPoint()
+        self._scroll_step = 0
+        self._scroll_drag_timer = QTimer(self)
+        self._scroll_drag_timer.setInterval(60)
+        self._scroll_drag_timer.timeout.connect(self._scroll_drag)
         self.setViewMode(QListView.IconMode)
         self.setResizeMode(QListView.Adjust)
         self.setMovement(QListView.Static)
@@ -324,6 +333,8 @@ class _EntryView(QListView):
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDrop)
+        # Qt 自带拖动会向桌面复制文件；内部虚拟拖动由鼠标释放位置提交。
+        self.setDragEnabled(False)
         self.setDefaultDropAction(Qt.CopyAction)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
@@ -349,6 +360,78 @@ class _EntryView(QListView):
         self.itemContextMenuRequested.emit(pos)
         event.accept()
 
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        index = self.indexAt(self.viewport().mapFromGlobal(event.globalPos()))
+        self._press_position = QPoint(event.globalPos()) if event.button() == Qt.LeftButton and index.isValid() else None
+
+    def mouseMoveEvent(self, event):
+        if (self._press_position is not None and event.buttons() & Qt.LeftButton
+                and (event.globalPos() - self._press_position).manhattanLength() >= QApplication.startDragDistance()):
+            self._press_position = None
+            self._drag_position = QPoint(event.globalPos())
+            self.startDrag(Qt.CopyAction)
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press_position = None
+        super().mouseReleaseEvent(event)
+
+    def insertion_row(self, position):
+        count = self.model().rowCount()
+        index = self.indexAt(position)
+        if not index.isValid():
+            first = self.visualRect(self.model().index(0, 0))
+            return 0 if count and position.y() < first.top() else count
+        cell = self.visualRect(index)
+        after = position.y() > cell.center().y() if self.viewMode() == QListView.ListMode else position.x() > cell.center().x()
+        return index.row() + int(after)
+
+    def set_insertion(self, row):
+        if row is None:
+            self._scroll_drag_timer.stop()
+            self._scroll_step = 0
+        if row != self._insert_row:
+            self._insert_row = row
+            self.viewport().update()
+
+    def update_drag_position(self, position):
+        self._drag_position = QPoint(position)
+        self.set_insertion(self.insertion_row(position))
+        bar = self.verticalScrollBar()
+        self._scroll_step = -1 if position.y() < 26 else 1 if position.y() > self.viewport().height() - 26 else 0
+        if (self._scroll_step < 0 and bar.value() > bar.minimum()
+                or self._scroll_step > 0 and bar.value() < bar.maximum()):
+            if not self._scroll_drag_timer.isActive():
+                self._scroll_drag_timer.start()
+        else:
+            self._scroll_drag_timer.stop()
+
+    def _scroll_drag(self):
+        bar = self.verticalScrollBar()
+        old = bar.value()
+        bar.setValue(old + self._scroll_step * 30)
+        self.set_insertion(self.insertion_row(self._drag_position))
+        if bar.value() == old:
+            self._scroll_drag_timer.stop()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._insert_row is None or not self.model().rowCount():
+            return
+        count = self.model().rowCount()
+        cell = self.visualRect(self.model().index(min(self._insert_row, count - 1), 0))
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#87adf2"), 2.5, Qt.SolidLine, Qt.RoundCap))
+        if self.viewMode() == QListView.ListMode:
+            y = cell.bottom() if self._insert_row == count else cell.top()
+            painter.drawLine(8, y, self.viewport().width() - 8, y)
+        else:
+            x = cell.right() if self._insert_row == count else cell.left()
+            painter.drawLine(x, cell.top() + 13, x, cell.bottom() - 13)
+
     def dragEnterEvent(self, event):
         if self.can_drop and event.mimeData().hasUrls():
             event.acceptProposedAction()
@@ -369,19 +452,12 @@ class _EntryView(QListView):
         event.ignore()
 
     def startDrag(self, actions):
-        from PyQt5.QtCore import QUrl
-        indexes = self.selectedIndexes()
+        indexes = sorted(self.selectedIndexes(), key=lambda index: index.row())
         if not indexes:
             return
-        mime = QMimeData()
-        mime.setUrls([QUrl.fromLocalFile(ix.data(Qt.UserRole)["path"]) for ix in indexes])
-        drag = QDrag(self)
-        drag.setMimeData(mime)
         icon = indexes[0].data(Qt.DecorationRole)
-        if icon:
-            drag.setPixmap(icon.pixmap(40, 40))
-        # 虚拟分类始终使用 Copy；拖到外部时不得要求移动原文件。
-        drag.exec_(Qt.CopyAction, Qt.CopyAction)
+        self.dragRequested.emit([ix.data(Qt.UserRole)["path"] for ix in indexes],
+                                icon.pixmap(40, 40) if icon else QPixmap(), self._drag_position)
 
 
 class _ElidedLabel(QLabel):
@@ -460,7 +536,8 @@ class _GlassSurface(QFrame):
 
 
 class CategoryPanel(QWidget):
-    def __init__(self, service, launch_callback, pin_callback, light=True, parent=None, menu_theme=None, file_actions=None):
+    def __init__(self, service, launch_callback, pin_callback, light=True, parent=None, menu_theme=None, file_actions=None,
+                 drag_session=None, drag_target=None):
         # Windows 的原生弹窗阴影按矩形窗口绘制，会露在透明圆角外侧。
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self.setWindowTitle("Window Dock 分类面板")
@@ -469,6 +546,8 @@ class CategoryPanel(QWidget):
         self.launch_callback = launch_callback
         self.pin_callback = pin_callback
         self.file_actions = file_actions
+        self.drag_session = drag_session or EntryDrag(self)
+        self.drag_target = drag_target
         self.light = light
         self.menu_theme = menu_theme
         self.category_id = None
@@ -510,6 +589,7 @@ class CategoryPanel(QWidget):
         self.view.itemContextMenuRequested.connect(self._context_menu)
         self.view.doubleClicked.connect(self._launch_index)
         self.view.pathsDropped.connect(self._assign)
+        self.view.dragRequested.connect(self._start_entry_drag)
         self._file_shortcuts = []
         if self.file_actions:
             for key, command in ((QKeySequence.Copy, "copy"), (QKeySequence.Cut, "cut"), (QKeySequence.Delete, "delete")):
@@ -530,7 +610,7 @@ class CategoryPanel(QWidget):
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.status.hide()
-        self.view.setToolTip("双击打开，右键查看操作；拖放只改变分类，不移动原文件")
+        self.view.setToolTip("双击打开；拖动调整顺序，拖出移除分类入口；原文件位置不变，Esc 取消拖动")
         self.setStyleSheet(_stylesheet(light))
         service.changed.connect(self._changed)
         service.error.connect(self._error)
@@ -565,9 +645,57 @@ class CategoryPanel(QWidget):
             self._appear.start()
 
     def hideEvent(self, event):
+        if self.drag_session.active and self.drag_session.source is self.view.viewport():
+            self.drag_session.cancel()
         self._appear.stop()
         self.setWindowOpacity(1)
         super().hideEvent(event)
+
+    def _start_entry_drag(self, paths, icon, position):
+        category_id = self.category_id
+
+        def move(point):
+            local = self.view.viewport().mapFromGlobal(point)
+            if self.view.viewport().rect().contains(local):
+                self.view.update_drag_position(local)
+                if self.drag_target:
+                    self.drag_target(paths, point, "clear")
+                return "放开调整顺序 · Esc 取消"
+            self.view.set_insertion(None)
+            if self.rect().contains(self.mapFromGlobal(point)):
+                return "拖到项目之间调整顺序"
+            return self.drag_target(paths, point, "hover") if self.drag_target else "放开移除分类入口 · 原文件保留"
+
+        def cancel():
+            self.view.set_insertion(None)
+            if self.drag_target:
+                self.drag_target(paths, QPoint(), "clear")
+
+        def drop(point):
+            local = self.view.viewport().mapFromGlobal(point)
+            row = self.view.insertion_row(local)
+            cancel()
+            if self.view.viewport().rect().contains(local):
+                selected = {normalize_path(path) for path in paths}
+                before = next((entry["path"] for entry in self.model.items[row:]
+                               if normalize_path(entry["path"]) not in selected), None)
+                self.service.reorder_paths(category_id, paths, before)
+                selection = self.view.selectionModel()
+                selection.clearSelection()
+                for path in paths:
+                    row = self.model.row_by_path.get(normalize_path(path))
+                    if row is not None:
+                        selection.select(self.model.index(row, 0), QItemSelectionModel.Select)
+                return
+            if self.rect().contains(self.mapFromGlobal(point)):
+                return
+            if self.drag_target:
+                self.drag_target(paths, point, "drop")
+            else:
+                self.service.exclude_paths(paths)
+            self.hide()
+
+        self.drag_session.begin(self.view.viewport(), paths, icon, position, move, drop, cancel)
 
     def _changed(self):
         if self.isVisible():
@@ -804,7 +932,7 @@ class CategoryPanel(QWidget):
             paths = [ix.data(Qt.UserRole)["path"] for ix in self.view.selectedIndexes()]
         if not paths:
             return
-        if command == "delete":
+        if command == "delete" or command.startswith(("compress:", "extract:")):
             self.hide()
         self.file_actions.perform(command, paths)
 

@@ -316,7 +316,7 @@ class DockSearch(QWidget):
         elif chosen == pin_action:
             self.dock.pin_path(path)
         elif chosen in commands:
-            if commands[chosen] == "delete":
+            if commands[chosen] == "delete" or commands[chosen].startswith(("compress:", "extract:")):
                 self.collapse(animate=False)
             self.dock.file_actions.perform(commands[chosen], [path])
         if not self.isActiveWindow():

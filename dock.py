@@ -37,7 +37,7 @@ from desktop_visibility import icons_visible, set_icons_visible
 APP_NAME = "BigFishDock"            # 配置目录名 + 注册表自启动项名
 APP_TITLE = "大肥鱼dock栏"           # 显示给用户看的名字
 MAIN_WINDOW_MARKER = "BigFishDock.MainDock"
-VERSION = "1.1.37"
+VERSION = "1.1.39"
 LEGACY_APP_NAME = "LiquidGlassDock"  # 旧名字，用来迁移配置和清理旧自启动项
 
 # 打包成 exe 之后（PyInstaller），__file__ 指向临时解包目录，不能用；
@@ -76,7 +76,7 @@ DEFAULT_CONFIG = {
     "blur_px": 6,         # 毛玻璃模糊程度（缩小的倍数，越大越糊）
     "bump_level": "mid",  # 悬停放大程度：low/mid/high，沿用旧配置键
     "lang": "zh",         # 界面语言：zh=中文 / en=English
-    "reorder": False,     # 允许拖动图标排序（默认关闭，防止误拖）
+    "reorder": True,      # 默认允许拖动排序；超过系统拖动阈值后才进入拖动
     "sep_split": True,    # 分隔符隔断模式：夹在两图标之间的分隔符会切开玻璃背景
     "position": "bottom", # 位置：bottom/top/left/right，custom 保留旧水平自定义高度
     "custom_bottom": 200, # 自定义位置时，距屏幕底部多少像素
@@ -683,10 +683,10 @@ def start_menu_dirs():
 # ----------------------------------------------------------------------------
 import PyQt5
 from PyQt5.QtCore import (Qt, QTimer, QPoint, QPointF, QRectF, QSize, QFileInfo,
-                          QSharedMemory, QEvent, pyqtSignal, QMimeData, QUrl, QRect)
+                          QSharedMemory, QEvent, pyqtSignal, QRect)
 from PyQt5.QtGui import (QColor, QIcon, QImage, QPainter, QPainterPath, QPixmap,
                          QLinearGradient, QRadialGradient, QPen, QBrush, QFont,
-                         QFontMetrics, QGuiApplication, QCursor, QDrag, QTransform)
+                         QFontMetrics, QGuiApplication, QCursor, QTransform)
 from PyQt5.QtWidgets import (QApplication, QWidget, QSystemTrayIcon,
                              QAction, QActionGroup, QFileDialog, QMessageBox,
                              QFileIconProvider, QToolTip, QInputDialog)
@@ -697,6 +697,7 @@ from menu_ui import ThemedMenu
 from trash_artwork import trash_pixmap, computer_pixmap
 from dock_search import DockSearch
 from file_actions import FileActions
+from entry_drag import EntryDrag
 
 # Qt 5 的安装路径探测在中文虚拟环境中可能损坏，显式保留 Unicode 插件路径。
 _qt_platforms = os.path.join(os.path.dirname(PyQt5.__file__), "Qt5", "plugins", "platforms")
@@ -914,6 +915,7 @@ class Dock(QWidget):
         self.desktop_manager = None
         self.recycle_bin = None
         self.file_actions = FileActions(self)
+        self.entry_drag = EntryDrag(self)
         self.category_panel = None
         self.category_manager = None
         self.search_bar = None
@@ -951,6 +953,7 @@ class Dock(QWidget):
         self.drag_moved = False
         self.drag_from_x = 0.0
         self.drag_start_pos = QPoint()
+        self._drag_snapshot = None
         self.items = []
         self.cur = []
         self.tgt = []
@@ -1868,27 +1871,43 @@ class Dock(QWidget):
         pos = self.window_to_axis(e.pos())
         self.mouse_x = float(pos.x())
         self.spec_x = float(pos.x())
-        # 普通拖动把入口送进分类；开启旧排序时按 Shift 拖动仍可归类。
+        # 沿 Dock 拖动排序，拖离玻璃条或按 Shift 时进入虚拟入口拖动。
         if self.pressed >= 0 and e.buttons() & Qt.LeftButton:
             it = self.items[self.pressed]
             if (it.get("path") and not it.get("sep")
-                    and (not self.cfg.get("reorder") or e.modifiers() & Qt.ShiftModifier)
+                    and (not self.cfg.get("reorder", True) or e.modifiers() & Qt.ShiftModifier
+                         or not self.bar_rect_f().adjusted(-16, -30, 16, 30).contains(pos))
                     and (e.pos() - self.drag_start_pos).manhattanLength() > QApplication.startDragDistance()):
-                drag = QDrag(self)
-                mime = QMimeData()
-                mime.setUrls([QUrl.fromLocalFile(it["path"])])
-                drag.setMimeData(mime)
-                if it.get("pixmap") is not None:
-                    drag.setPixmap(it["pixmap"].scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                paths = [it["path"]]
+                icon = it.get("pixmap") or QPixmap()
                 self.pressed = self.drag_idx = -1
-                drag.exec_(Qt.CopyAction)
-                self.leaveEvent(QEvent(QEvent.Leave))
+                def cancel():
+                    self._entry_drag_target(paths, QPoint(), "clear", "pinned")
+                    self._restore_drag_order()
+                    self._clear_hover()
+                def drop(point):
+                    if self._entry_drag_target(paths, point, "drop", "pinned"):
+                        self._drag_snapshot = None
+                        self._clear_hover()
+                    else:
+                        cancel()
+                self.entry_drag.begin(self, paths, icon, e.globalPos(),
+                                      lambda point: self._entry_drag_target(paths, point, "hover", "pinned"), drop, cancel)
                 return
         # 拖动排序模式：按住左键移动 = 排序
         if self.drag_idx >= 0 and (e.buttons() & Qt.LeftButton):
-            if abs(pos.x() - self.drag_from_x) > 4:
+            if (e.pos() - self.drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
                 self.drag_moved = True
             if self.drag_moved:
+                if (self.items[self.drag_idx].get("category")
+                        and not self.bar_rect_f().adjusted(-16, -30, 16, 30).contains(pos)):
+                    return
+                if QWidget.keyboardGrabber() is not self:
+                    self.grabKeyboard()
+                now = time.perf_counter()
+                if now - self._last_move_calc < .008:
+                    return
+                self._last_move_calc = now
                 self._drag_reorder(float(pos.x()))
                 self.hover_index = self.drag_idx      # 名称气泡跟着被拖的图标
                 self._recalc(light=True)
@@ -1946,6 +1965,9 @@ class Dock(QWidget):
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             self.drag_start_pos = QPoint(e.pos())
+            self._drag_snapshot = {"items": [dict(item) for item in self.cfg["items"]],
+                                   "categories": list(self.organizer.state["categories"]) if self.organizer else [],
+                                   "separators": separator_positions(self.organizer.state) if self.organizer else []}
             self.pressed = self._hit(e.pos())
             # 弹窗关闭后的点击不一定先经过 MouseMove，点击反馈直接绑定此次命中的入口。
             self.hover_index = self.pressed
@@ -1956,7 +1978,7 @@ class Dock(QWidget):
             self.drag_idx = -1
             self.drag_moved = False
             self.drag_from_x = float(self.window_to_axis(e.pos()).x())
-            if ((self.cfg.get("reorder") or (self.pressed >= 0 and self.items[self.pressed].get("category"))) and self.pressed >= 0
+            if ((self.cfg.get("reorder", True) or (self.pressed >= 0 and self.items[self.pressed].get("category"))) and self.pressed >= 0
                     and not self.items[self.pressed].get("sep")
                     and not self.items[self.pressed].get("trash")
                     and not self.items[self.pressed].get("computer")):
@@ -1966,7 +1988,41 @@ class Dock(QWidget):
                 self.drag_from_x = float(self.window_to_axis(e.pos()).x())
         super(Dock, self).mousePressEvent(e)
 
+    def _restore_drag_order(self):
+        snapshot, self._drag_snapshot = self._drag_snapshot, None
+        self.pressed = self.drag_idx = -1
+        self.drag_moved = False
+        if QWidget.keyboardGrabber() is self:
+            self.releaseKeyboard()
+        if not snapshot:
+            return
+        changed = self.cfg["items"] != snapshot["items"]
+        self.cfg["items"] = snapshot["items"]
+        if self.organizer and (self.organizer.state["categories"] != snapshot["categories"]
+                               or separator_positions(self.organizer.state) != snapshot["separators"]):
+            self.organizer.update_categories(snapshot["categories"], snapshot["separators"])
+        if changed:
+            save_config(self.cfg)
+        self._build_items()
+        self.reposition()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and self.drag_idx >= 0:
+            self._restore_drag_order()
+            self._clear_hover()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _drag_reorder(self, x):
+        # 快速跨过多项时直接追到当前指针所在位置，不要求每个邻居收到一次鼠标事件。
+        for _ in range(len(self.items)):
+            previous = self.drag_idx
+            self._drag_reorder_step(x)
+            if self.drag_idx == previous:
+                break
+
+    def _drag_reorder_step(self, x):
         """拖动排序：跟紧邻的图标/分隔符「一步一步」交换位置。
 
         带迟滞（要多越过邻居中心 30% 图标宽度才换），所以不会在临界点反复横跳；
@@ -2037,11 +2093,27 @@ class Dock(QWidget):
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:
+            if QWidget.keyboardGrabber() is self:
+                self.releaseKeyboard()
             if self.drag_idx >= 0:
                 if self.drag_moved:
+                    position = self.window_to_axis(e.pos())
+                    if not self.bar_rect_f().adjusted(-16, -30, 16, 30).contains(position):
+                        entry = self.items[self.drag_idx]
+                        if entry.get("path") and self._entry_drag_target([entry["path"]], e.globalPos(), "drop", "pinned"):
+                            self.drag_idx = self.pressed = -1
+                            self._drag_snapshot = None
+                            self._clear_hover()
+                        else:
+                            self._restore_drag_order()
+                            self._clear_hover()
+                        e.accept()
+                        return
+                    self._drag_reorder(float(self.window_to_axis(e.pos()).x()))
                     category_drag = self.items[self.drag_idx].get("category")
                     self.drag_idx = -1
                     self.pressed = -1
+                    self._drag_snapshot = None
                     if category_drag:
                         self.organizer.update_categories(self.organizer.state["categories"])
                     else:
@@ -2064,6 +2136,7 @@ class Dock(QWidget):
                 else:
                     self.launch(self.items[idx]["path"])
             self.pressed = -1
+            self._drag_snapshot = None
         super(Dock, self).mouseReleaseEvent(e)
 
     def launch(self, path):
@@ -2151,7 +2224,8 @@ class Dock(QWidget):
         set_entry_image_loader(entry_image)
         self.organizer = OrganizerService(self.cfg["organizer"], lambda: save_config(self.cfg), self, directories)
         self.category_panel = CategoryPanel(self.organizer, self.launch, self.pin_path, self.is_light(),
-                                            menu_theme=self.theme_colors, file_actions=self.file_actions)
+                                            menu_theme=self.theme_colors, file_actions=self.file_actions,
+                                            drag_session=self.entry_drag, drag_target=self._entry_drag_target)
         self.search_bar = DockSearch(self)
         self.organizer.changed.connect(self._organizer_changed)
         self.organizer.error.connect(lambda message: self.organizer_message("整理提示", message))
@@ -2204,6 +2278,61 @@ class Dock(QWidget):
         log(title + ": " + message)
         if self.tray is not None:
             self.tray.showMessage(title, message, QSystemTrayIcon.Information, 2500)
+
+    def _entry_drag_target(self, paths, point, stage, kind="category"):
+        index = self._hit(self.mapFromGlobal(point)) if stage != "clear" else -1
+        entry = self.items[index] if index >= 0 else {}
+        category = entry.get("category")
+        valid_category = category and category not in ("__uncategorized__", "__more__")
+        highlight = index if valid_category or entry.get("trash") else -1
+        if highlight != self._drop_index:
+            self._drop_index = highlight
+            self.update()
+        if stage == "clear":
+            return
+        local = self.window_to_axis(self.mapFromGlobal(point))
+        on_dock = index >= 0 or self.bar_rect_f().contains(local)
+        panel = self.category_panel
+        on_panel = panel and panel.isVisible() and panel.rect().contains(panel.mapFromGlobal(point))
+        panel_content = on_panel and panel.view.viewport().rect().contains(panel.view.viewport().mapFromGlobal(point))
+        panel_category = panel.category_id if panel_content else None
+        if panel_category in ("__uncategorized__", "__more__"):
+            panel_category = None
+        if stage == "hover":
+            if valid_category:
+                return "归入 %s" % entry["name"].split(" · ")[0]
+            if panel_category:
+                return "归入当前分类"
+            if entry.get("trash"):
+                return "放开后确认移入回收站"
+            if on_dock and index < 0:
+                return "固定至 Dock"
+            if on_dock or on_panel:
+                return "此处不能放置 · Esc 取消"
+            return "移除固定入口 · 原文件保留" if kind == "pinned" else "移除分类入口 · 原文件保留"
+        self._drop_index = -1
+        self.update()
+        if valid_category or panel_category:
+            self.organizer.assign_paths(paths, category if valid_category else panel_category)
+        elif entry.get("trash"):
+            if panel:
+                panel.hide()
+            return self.file_actions.perform("delete", paths)
+        elif on_dock and index < 0:
+            for path in paths:
+                self.pin_path(path)
+        elif on_dock or on_panel:
+            return False
+        elif kind == "pinned":
+            selected = {normalize_path(path) for path in paths}
+            self.cfg["items"] = [item for item in self.cfg["items"]
+                                 if not item.get("path") or normalize_path(item["path"]) not in selected]
+            save_config(self.cfg)
+            self._build_items()
+            self.reposition()
+        else:
+            self.organizer.exclude_paths(paths)
+        return True
 
     def pin_path(self, path):
         if not any(normalize_path(it.get("path", "")) == normalize_path(path) for it in self.cfg["items"] if it.get("path")):
@@ -2937,7 +3066,7 @@ class DockTray(QSystemTrayIcon):
 
         a = QAction(T("图标顺序可拖动"), m)
         a.setCheckable(True)
-        a.setChecked(bool(self.cfg.get("reorder", False)))
+        a.setChecked(bool(self.cfg.get("reorder", True)))
         a.triggered.connect(lambda v: self.set_flag("reorder", v))
         m.addAction(a)
 

@@ -50,6 +50,7 @@ def default_state():
         ],
         "automatic": True,
         "view_modes": {},  # 分类各自记住大图标或单列小图标，不参与规则匹配
+        "item_order": {},  # 分类内手动顺序，只影响展示，不改变规则或文件位置
         "dock_separators": ["apps"],  # 保存分隔符前方的分类 ID，不参与规则匹配
         "manual": {},
         "excluded": [],
@@ -313,4 +314,7 @@ def reconcile_entries(old_entries, new_entries, state):
     for key in ("excluded", "extra_paths"):
         state[key] = list(dict.fromkeys(moves.get(path, path)
                                        for path in state.get(key, []) if path not in removed))
+    for category, paths in state.get("item_order", {}).items():
+        state["item_order"][category] = list(dict.fromkeys(moves.get(path, path)
+                                                        for path in paths if path not in removed))
     return new_entries

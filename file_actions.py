@@ -8,6 +8,7 @@ from PyQt5.QtCore import QMimeData, QObject, Qt, QUrl
 from PyQt5.QtWidgets import QApplication, QDialog, QHBoxLayout, QVBoxLayout
 
 from category_manager import _GlassDialog, _button, _label
+from archive_actions import TOOL_NAMES, archive_arguments, installed_tools, is_archive, launch_archive
 
 
 # Qt 5 导出时按这个原生名称注册格式；x-qt-windows-mime 包装只用于读取外部格式。
@@ -50,6 +51,8 @@ class FileActions(QObject):
     def __init__(self, owner):
         super().__init__(owner)
         self.owner = owner
+        # 启动时发现一次，右键交互不承担冷启动的注册表和磁盘查询。
+        self.archive_tools = installed_tools()
 
     def add_menu(self, menu, paths):
         commands = {}
@@ -64,6 +67,23 @@ class FileActions(QObject):
                                   and not service.busy and not service.stopping)
                 action.setToolTip("移入系统回收站；快捷方式只删除入口本身")
             commands[action] = command
+        menu.addSeparator()
+        tools = self.archive_tools
+        for operation, title, icon in (("compress", "压缩…", "compress"), ("extract", "解压…", "extract")):
+            submenu = menu.addMenu(menu.glyph(icon), title)
+            available = bool(paths) and bool(tools) and (operation == "compress" or all(is_archive(path) for path in paths))
+            submenu.menuAction().setEnabled(available)
+            if not tools:
+                submenu.menuAction().setToolTip("未找到 Bandizip 或 7-Zip，安装或加入 PATH 后重启 Dock")
+            elif operation == "extract" and not available:
+                submenu.menuAction().setToolTip("请选择压缩包；支持同时选中多个压缩包")
+            for tool in tools:
+                action = submenu.addAction(submenu.glyph(icon), TOOL_NAMES[tool] + "…")
+                action.setToolTip("在 %s 中选择格式与保存位置" % TOOL_NAMES[tool] if operation == "compress"
+                                  else "在 %s 中选择解压位置，保留同名文件询问" % TOOL_NAMES[tool])
+                commands[action] = operation + ":" + tool
+            submenu.setToolTipsVisible(True)
+        menu.setToolTipsVisible(True)
         return commands
 
     def perform(self, command, paths):
@@ -71,6 +91,22 @@ class FileActions(QObject):
         paths = list(dict.fromkeys(os.path.abspath(path) for path in paths if path))
         if not paths:
             return False
+        if command.startswith(("compress:", "extract:")):
+            operation, tool = command.split(":", 1)
+            executable = self.archive_tools.get(tool)
+            if not executable:
+                self.owner.organizer_message("压缩与解压", "未找到压缩软件，请安装后重启 Dock。")
+                return False
+            if operation == "extract" and not all(is_archive(path) for path in paths):
+                return False
+            try:
+                arguments = archive_arguments(tool, operation, paths)
+                launch_archive(executable, arguments, os.path.dirname(paths[0]))
+            except OSError as error:
+                detail = "选中项目的路径总长度过长，请分批操作。" if getattr(error, "winerror", None) == 206 else str(error)
+                self.owner.organizer_message("压缩与解压", "无法启动 %s：%s" % (TOOL_NAMES[tool], detail))
+                return False
+            return True
         if command in ("copy", "cut"):
             mime = QMimeData()
             mime.setUrls([QUrl.fromLocalFile(path) for path in paths])

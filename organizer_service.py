@@ -214,8 +214,10 @@ class OrganizerService(QObject):
         # Dock、面板和完成提示共享同一份结果，只有索引或归属改变才重算。
         if self._groups_cache is None:
             grouped = classify(self.entries.values(), self.state)
-            for items in grouped.values():
-                items.sort(key=lambda item: (item["kind"] != "folders", item["name"].casefold()))
+            for category, items in grouped.items():
+                positions = {path: index for index, path in enumerate(self.state.get("item_order", {}).get(category, []))}
+                items.sort(key=lambda item: (positions.get(normalize_path(item["path"]), len(positions)),
+                                             item["kind"] != "folders", item["name"].casefold()))
             self._groups_cache = grouped
         return self._groups_cache
 
@@ -264,6 +266,8 @@ class OrganizerService(QObject):
                                 in self.state.get("manual", {}).items() if category in ids}
         self.state["view_modes"] = {key: mode for key, mode in self.state.get("view_modes", {}).items()
                                     if key in ids or key == "__uncategorized__"}
+        self.state["item_order"] = {key: order for key, order in self.state.get("item_order", {}).items()
+                                    if key in ids or key == "__uncategorized__"}
         self._persist()
         self._notify_changed()
 
@@ -271,6 +275,23 @@ class OrganizerService(QObject):
         self.state.setdefault("view_modes", {})[category_id] = mode
         # 仅保存显示偏好，不触发文件索引、重新分类或 Dock 动画重建。
         self._persist()
+
+    def reorder_paths(self, category_id, paths, before=None):
+        current = [normalize_path(entry["path"]) for entry in self.groups().get(category_id, [])]
+        selected = {normalize_path(path) for path in paths}
+        moving = [path for path in current if path in selected]
+        if not moving:
+            return
+        remaining = [path for path in current if path not in selected]
+        before = normalize_path(before) if before else None
+        offset = remaining.index(before) if before in remaining else len(remaining)
+        ordered = remaining[:offset] + moving + remaining[offset:]
+        if ordered == current:
+            return
+        self.state.setdefault("item_order", {})[category_id] = ordered
+        # 放手后保存一次；排序只重用现有索引，不启动扫描。
+        self._persist()
+        self._notify_changed()
 
     def assign_paths(self, paths, category_id):
         if category_id not in {item["id"] for item in self.state["categories"]}:
