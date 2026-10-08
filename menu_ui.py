@@ -42,6 +42,20 @@ def glyph(name, color=None):
         p.drawRoundedRect(QRectF(3.5, 7, 12, 9.5), 2, 2)
         path([(9, 11), (16.5, 3.5), (16.5, 8)])
         line(12, 3.5, 16.5, 3.5)
+    elif name == "copy":
+        p.drawRoundedRect(QRectF(7, 7, 10, 10), 1.7, 1.7)
+        path([(5, 13), (3, 13), (3, 3), (13, 3), (13, 5)])
+    elif name == "cut":
+        p.drawEllipse(QRectF(3, 12, 5, 5))
+        p.drawEllipse(QRectF(12, 12, 5, 5))
+        line(6.5, 12.5, 15, 3)
+        line(13.5, 12.5, 5, 3)
+    elif name == "delete":
+        line(3.5, 5.5, 16.5, 5.5)
+        path([(6, 5.5), (7, 3), (13, 3), (14, 5.5)])
+        path([(5, 7.5), (6, 17), (14, 17), (15, 7.5)])
+        line(8.5, 8.5, 9, 14)
+        line(11.5, 8.5, 11, 14)
     elif name == "pin":
         path([(8, 3.5), (15.5, 6.5), (13.5, 8), (12, 11.5), (13, 13.5), (6, 11), (8, 9.5), (9, 5.5)], True)
         line(8.5, 12.5, 5, 17)

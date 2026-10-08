@@ -8,12 +8,12 @@ from collections import Counter
 
 from PyQt5.QtCore import (QAbstractListModel, QEasingCurve, QEvent, QPoint, QPointF, QRect, QRectF,
                           QSize, Qt, QThread, QTimer, QVariantAnimation, pyqtSignal)
-from PyQt5.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
+from PyQt5.QtGui import QColor, QContextMenuEvent, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PyQt5.QtWidgets import (QAbstractItemView, QApplication, QGraphicsOpacityEffect, QLabel, QLineEdit,
                              QListView, QStyle, QStyledItemDelegate, QToolButton, QWidget)
 
 from organizer import normalize_path
-from organizer_ui import _entry_label, _GlassSurface, _stylesheet
+from organizer_ui import _entry_label, _entry_menu_position, _GlassSurface, _stylesheet
 from menu_ui import ThemedMenu
 
 
@@ -192,6 +192,19 @@ class _SearchEdit(QLineEdit):
             owner.collapse()
 
 
+class _ResultView(QListView):
+    itemContextMenuRequested = pyqtSignal(QPoint)
+
+    def contextMenuEvent(self, event):
+        if event.reason() == QContextMenuEvent.Keyboard:
+            index = self.currentIndex()
+            pos = self.visualRect(index).center() if index.isValid() else QPoint(-1, -1)
+        else:
+            pos = self.viewport().mapFromGlobal(event.globalPos())
+        self.itemContextMenuRequested.emit(pos)
+        event.accept()
+
+
 class DockSearch(QWidget):
     """放大镜展开成输入框；结果与输入共用窗口，避免焦点在弹窗间跳转。"""
     def __init__(self, dock):
@@ -242,7 +255,7 @@ class DockSearch(QWidget):
         self.empty.setProperty("muted", True)
         self.empty.setAlignment(Qt.AlignCenter)
         self.empty.setWordWrap(True)
-        self.view = QListView(self.surface)
+        self.view = _ResultView(self.surface)
         self.model = _ResultModel(dock.category_panel.model, self)
         self.view.setModel(self.model)
         self.view.setItemDelegate(_ResultDelegate(self))
@@ -254,6 +267,7 @@ class DockSearch(QWidget):
         self.view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.view.setFocusPolicy(Qt.NoFocus)
         self.view.clicked.connect(self._open_index)
+        self.view.itemContextMenuRequested.connect(self._result_context_menu)
         self.surface.hide()
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -274,6 +288,39 @@ class DockSearch(QWidget):
 
     def px(self, value):
         return int(round(value * self.dock.ui_mult))
+
+    def _result_context_menu(self, pos):
+        index = self.view.indexAt(pos) if self.view.viewport().rect().contains(pos) else self.model.index(-1, 0)
+        if not index.isValid():
+            return
+        # 菜单打开后异步查询可能更新结果，操作使用右击时快照中的原路径。
+        path = index.data(Qt.UserRole)["path"]
+        self.view.setCurrentIndex(index)
+        menu = ThemedMenu(self, light=self.light, colors=self.dock.theme_colors())
+        open_action = menu.addAction(menu.glyph("open"), "打开")
+        pin_action = menu.addAction(menu.glyph("pin"), "固定至 Dock")
+        menu.addSeparator()
+        commands = self.dock.file_actions.add_menu(menu, [path])
+        rect = self.view.visualRect(index).intersected(self.view.viewport().rect())
+        anchor = QRect(self.view.viewport().mapToGlobal(rect.topLeft()), rect.size())
+        screen = QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()
+        self._editing_menu = True
+        try:
+            chosen = menu.exec_(_entry_menu_position(anchor, menu.sizeHint(), screen.availableGeometry()))
+        finally:
+            self._editing_menu = False
+            menu.deleteLater()
+        if chosen == open_action:
+            self.collapse()
+            self.dock.launch(path)
+        elif chosen == pin_action:
+            self.dock.pin_path(path)
+        elif chosen in commands:
+            if commands[chosen] == "delete":
+                self.collapse(animate=False)
+            self.dock.file_actions.perform(commands[chosen], [path])
+        if not self.isActiveWindow():
+            self.collapse()
 
     def update_theme(self):
         self.light = self.dock.is_light()

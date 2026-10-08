@@ -37,7 +37,7 @@ from desktop_visibility import icons_visible, set_icons_visible
 APP_NAME = "BigFishDock"            # 配置目录名 + 注册表自启动项名
 APP_TITLE = "大肥鱼dock栏"           # 显示给用户看的名字
 MAIN_WINDOW_MARKER = "BigFishDock.MainDock"
-VERSION = "1.1.36"
+VERSION = "1.1.37"
 LEGACY_APP_NAME = "LiquidGlassDock"  # 旧名字，用来迁移配置和清理旧自启动项
 
 # 打包成 exe 之后（PyInstaller），__file__ 指向临时解包目录，不能用；
@@ -696,6 +696,7 @@ from organizer_artwork import category_pixmap, set_native_icons
 from menu_ui import ThemedMenu
 from trash_artwork import trash_pixmap, computer_pixmap
 from dock_search import DockSearch
+from file_actions import FileActions
 
 # Qt 5 的安装路径探测在中文虚拟环境中可能损坏，显式保留 Unicode 插件路径。
 _qt_platforms = os.path.join(os.path.dirname(PyQt5.__file__), "Qt5", "plugins", "platforms")
@@ -912,6 +913,7 @@ class Dock(QWidget):
         self.organizer = None
         self.desktop_manager = None
         self.recycle_bin = None
+        self.file_actions = FileActions(self)
         self.category_panel = None
         self.category_manager = None
         self.search_bar = None
@@ -2082,6 +2084,7 @@ class Dock(QWidget):
     def contextMenuEvent(self, e):
         idx = self._hit(e.pos())
         m = ThemedMenu(self, light=self.is_light(), colors=self.theme_colors())
+        file_commands, file_paths = {}, []
         if idx >= 0 and self.items[idx].get("trash") and self.recycle_bin:
             m.addAction(m.glyph("open"), "打开回收站").triggered.connect(self.recycle_bin.open)
             empty = m.addAction(m.glyph("remove"), "清空回收站…")
@@ -2104,6 +2107,9 @@ class Dock(QWidget):
             a.triggered.connect(lambda _=False, p=it["path"]: self.launch(p))
             m.addAction(a)
             m.addSeparator()
+            file_paths = [it["path"]]
+            file_commands = self.file_actions.add_menu(m, file_paths)
+            m.addSeparator()
             if self.organizer is not None:
                 sub = m.addMenu("放入分类")
                 for c in self.organizer.state["categories"]:
@@ -2124,8 +2130,10 @@ class Dock(QWidget):
             self.cfg.get("position", "bottom"), "below" if self.bump_down() else "above")
         m.ensurePolished()
         self._clear_hover()
-        m.exec_(_entry_menu_position(anchor, m.sizeHint(), screen.availableGeometry(), preferred))
+        chosen = m.exec_(_entry_menu_position(anchor, m.sizeHint(), screen.availableGeometry(), preferred))
         m.deleteLater()
+        if chosen in file_commands:
+            self.file_actions.perform(file_commands[chosen], file_paths)
 
     def menu_anchor(self, index):
         """Dock 菜单按可见图标展开，透明动画区不参与定位。"""
@@ -2143,7 +2151,7 @@ class Dock(QWidget):
         set_entry_image_loader(entry_image)
         self.organizer = OrganizerService(self.cfg["organizer"], lambda: save_config(self.cfg), self, directories)
         self.category_panel = CategoryPanel(self.organizer, self.launch, self.pin_path, self.is_light(),
-                                            menu_theme=self.theme_colors)
+                                            menu_theme=self.theme_colors, file_actions=self.file_actions)
         self.search_bar = DockSearch(self)
         self.organizer.changed.connect(self._organizer_changed)
         self.organizer.error.connect(lambda message: self.organizer_message("整理提示", message))

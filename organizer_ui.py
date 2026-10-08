@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Dock 分类面板和规则编辑器；所有操作只改变虚拟归属。"""
+"""Dock 分类面板与文件操作入口；拖放归类不改变原文件。"""
 
 import os
 from collections import OrderedDict
@@ -7,11 +7,11 @@ from collections import OrderedDict
 from PyQt5.QtCore import (QAbstractListModel, QEasingCurve, QEvent, QFileInfo, QItemSelectionModel, QMimeData, QObject,
                           QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, QThread,
                           pyqtSignal, pyqtSlot)
-from PyQt5.QtGui import (QColor, QContextMenuEvent, QDrag, QIcon, QImage, QLinearGradient,
+from PyQt5.QtGui import (QColor, QContextMenuEvent, QDrag, QIcon, QImage, QKeySequence, QLinearGradient,
                          QPainter, QPainterPath, QPen, QPixmap)
 from PyQt5.QtWidgets import (QAbstractItemView, QActionGroup, QApplication,
                              QFileIconProvider, QFrame, QHBoxLayout, QLabel,
-                             QListView, QSizePolicy, QStyle, QStyledItemDelegate,
+                             QListView, QShortcut, QSizePolicy, QStyle, QStyledItemDelegate,
                              QVBoxLayout, QWidget)
 
 try:
@@ -460,7 +460,7 @@ class _GlassSurface(QFrame):
 
 
 class CategoryPanel(QWidget):
-    def __init__(self, service, launch_callback, pin_callback, light=True, parent=None, menu_theme=None):
+    def __init__(self, service, launch_callback, pin_callback, light=True, parent=None, menu_theme=None, file_actions=None):
         # Windows 的原生弹窗阴影按矩形窗口绘制，会露在透明圆角外侧。
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self.setWindowTitle("Window Dock 分类面板")
@@ -468,6 +468,7 @@ class CategoryPanel(QWidget):
         self.service = service
         self.launch_callback = launch_callback
         self.pin_callback = pin_callback
+        self.file_actions = file_actions
         self.light = light
         self.menu_theme = menu_theme
         self.category_id = None
@@ -509,6 +510,14 @@ class CategoryPanel(QWidget):
         self.view.itemContextMenuRequested.connect(self._context_menu)
         self.view.doubleClicked.connect(self._launch_index)
         self.view.pathsDropped.connect(self._assign)
+        self._file_shortcuts = []
+        if self.file_actions:
+            for key, command in ((QKeySequence.Copy, "copy"), (QKeySequence.Cut, "cut"), (QKeySequence.Delete, "delete")):
+                shortcut = QShortcut(QKeySequence(key), self.view)
+                shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+                shortcut.setAutoRepeat(False)
+                shortcut.activated.connect(lambda value=command: self._file_command(value))
+                self._file_shortcuts.append(shortcut)
         layout.addWidget(self.view, 1)
         self.empty = QLabel("拖入应用或文件，创建你的分类\n也可以在管理分类中添加筛选规则\n原文件位置保持不变")
         self.empty.setAlignment(Qt.AlignCenter)
@@ -743,6 +752,9 @@ class CategoryPanel(QWidget):
         open_action = menu.addAction(menu.glyph("open"), "打开")
         pin_action = menu.addAction(menu.glyph("pin"), "固定至 Dock")
         menu.addSeparator()
+        file_commands = self.file_actions.add_menu(menu, paths) if self.file_actions else {}
+        if file_commands:
+            menu.addSeparator()
         move_menu = menu.addMenu("手动归入分类")
         move_menu.menuAction().setIcon(menu.glyph("categories"))
         actions = {}
@@ -774,6 +786,8 @@ class CategoryPanel(QWidget):
         elif action == pin_action:
             for path in paths:
                 self.pin_callback(path)
+        elif action in file_commands:
+            self._file_command(file_commands[action], paths)
         elif action == auto_action:
             self.service.restore_auto(paths)
         elif action == exclude_action:
@@ -782,6 +796,17 @@ class CategoryPanel(QWidget):
             self.service.assign_paths(paths, actions[action])
         elif action in view_actions:
             self._set_view_mode(view_actions[action])
+
+    def _file_command(self, command, paths=None):
+        if self.file_actions is None:
+            return
+        if paths is None:
+            paths = [ix.data(Qt.UserRole)["path"] for ix in self.view.selectedIndexes()]
+        if not paths:
+            return
+        if command == "delete":
+            self.hide()
+        self.file_actions.perform(command, paths)
 
     def _error(self, message):
         self._set_status(message)
