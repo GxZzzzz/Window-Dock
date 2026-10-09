@@ -35,7 +35,8 @@ class DesktopManager(QObject):
         self.process.errorOccurred.connect(self._process_error)
         self._startup = QTimer(self)
         self._startup.setSingleShot(True)
-        self._startup.setInterval(20000)
+        # 容纳旧连接退出及有限超时重试；单次启动计时，不增加空闲检查。
+        self._startup.setInterval(40000)
         self._startup.timeout.connect(self._startup_timeout)
 
     def update(self, groups, categories):

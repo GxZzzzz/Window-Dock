@@ -37,7 +37,7 @@ from desktop_visibility import icons_visible, set_icons_visible
 APP_NAME = "BigFishDock"            # 配置目录名 + 注册表自启动项名
 APP_TITLE = "大肥鱼dock栏"           # 显示给用户看的名字
 MAIN_WINDOW_MARKER = "BigFishDock.MainDock"
-VERSION = "1.1.39"
+VERSION = "1.1.40"
 LEGACY_APP_NAME = "LiquidGlassDock"  # 旧名字，用来迁移配置和清理旧自启动项
 
 # 打包成 exe 之后（PyInstaller），__file__ 指向临时解包目录，不能用；
@@ -705,6 +705,21 @@ if os.path.isdir(_qt_platforms):
     os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", _qt_platforms)
 
 
+def entry_hicon(path, px):
+    """快捷方式先取 Shell 的显示图标，保留自定义资源与图标索引。"""
+    is_link = path.lower().endswith(".lnk")
+    if is_link:
+        handle = extract_shell_hicon(path, 256)
+        if handle:
+            return handle
+    real = (resolve_lnk_target(path) or path) if is_link else path
+    if real.lower().endswith((".exe", ".dll", ".ico")) and os.path.exists(real):
+        handle = extract_hicon(real, max(64, int(px)))
+        if handle:
+            return handle
+    return None if is_link else extract_shell_hicon(path, 256)
+
+
 class IconProvider(object):
     """负责把文件路径变成好看的图标（会缓存）。"""
 
@@ -717,33 +732,15 @@ class IconProvider(object):
         if key in self.cache:
             return self.cache[key]
         pm = None
-        # 1) exe / dll / ico：直接抠出大图标，最清晰
-        real = path
-        if path.lower().endswith(".lnk"):
-            t = resolve_lnk_target(path)
-            if t:
-                real = t
-        if real.lower().endswith((".exe", ".dll", ".ico")) and os.path.exists(real):
-            hicon = extract_hicon(real, max(64, int(px)))
-            if hicon:
-                img = hicon_to_qimage(hicon)
-                if img is not None and not img.isNull():
-                    # 预乘格式是 Qt 平滑缩放/合成的快路径（每帧都要缩放图标，
-                    # 不转的话那一步会慢好几倍）
-                    if img.format() != QImage.Format_ARGB32_Premultiplied:
-                        img = img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
-                    pm = QPixmap.fromImage(img)
-        # 2) 兜底一：问 Windows 外壳要"超大图标"（文件夹、URL 快捷方式、商店应用都靠这个，
-        #    能拿到 256 像素，比 QFileIconProvider 的 32/40 像素清楚得多）
-        if pm is None or pm.isNull():
-            hicon = extract_shell_hicon(path, 256)
-            if hicon:
-                img = hicon_to_qimage(hicon)
-                if img is not None and not img.isNull():
-                    if img.format() != QImage.Format_ARGB32_Premultiplied:
-                        img = img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
-                    pm = QPixmap.fromImage(img)
-        # 3) 兜底二：交给 Qt 自带的方式
+        # 共用面板的提取顺序，避免固定入口和分类内图标不一致。
+        hicon = entry_hicon(path, px)
+        if hicon:
+            img = hicon_to_qimage(hicon)
+            if img is not None and not img.isNull():
+                if img.format() != QImage.Format_ARGB32_Premultiplied:
+                    img = img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+                pm = QPixmap.fromImage(img)
+        # 系统大图标不可用时，交给 Qt 自带的方式。
         if pm is None or pm.isNull():
             try:
                 ic = self.provider.icon(QFileInfo(path))
@@ -885,12 +882,7 @@ def entry_image(path):
     ole = ctypes.windll.ole32
     initialized = ole.CoInitialize(None) >= 0
     try:
-        real = resolve_lnk_target(path) or path if path.lower().endswith(".lnk") else path
-        handle = None
-        if real.lower().endswith((".exe", ".dll", ".ico")) and os.path.exists(real):
-            handle = extract_hicon(real, 128)
-        if not handle:
-            handle = extract_shell_hicon(path, 256)
+        handle = entry_hicon(path, 128)
         image = hicon_to_qimage(handle) if handle else None
         return normalize_entry_image(image) if image is not None else None
     finally:

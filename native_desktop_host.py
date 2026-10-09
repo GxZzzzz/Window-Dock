@@ -26,6 +26,11 @@ user.PostThreadMessageW.argtypes = [C.c_uint, C.c_uint, C.c_size_t, C.c_ssize_t]
 user.SendMessageTimeoutW.argtypes = [P, C.c_uint, C.c_size_t, C.c_ssize_t,
                                     C.c_uint, C.c_uint, C.POINTER(C.c_size_t)]
 user.SendMessageTimeoutW.restype = C.c_ssize_t
+user.FindWindowExW.argtypes = [P, P, C.c_wchar_p, C.c_wchar_p]
+user.FindWindowExW.restype = P
+user.GetClassNameW.argtypes = [P, C.c_wchar_p, C.c_int]
+user.IsWindow.argtypes = [P]
+user.PostMessageW.argtypes = [P, C.c_uint, C.c_size_t, C.c_ssize_t]
 kernel.OpenProcess.argtypes = [C.c_uint, C.c_int, C.c_uint]
 kernel.OpenProcess.restype = P
 kernel.CreateEventW.argtypes = [P, C.c_int, C.c_int, C.c_wchar_p]
@@ -70,6 +75,7 @@ class NativeDesktop(QWidget):
                 _check(_method(shell_view, 3, C.POINTER(P))(shell_view, C.byref(hwnd)), '读取原生桌面窗口')
         pid = C.c_uint()
         thread = user.GetWindowThreadProcessId(hwnd, C.byref(pid))
+        self._wait_for_previous_connection(pid.value)
         self.hook = user.SetWindowsHookExW(3, C.cast(self.library.DesktopConnect, P),
                                           self.library._handle, thread)
         if not self.hook:
@@ -97,6 +103,30 @@ class NativeDesktop(QWidget):
         self.watcher = threading.Thread(target=watch, name='Explorer lifetime', daemon=True)
         self.watcher.start()
         self.timeout.start()
+
+    def _wait_for_previous_connection(self, explorer_pid):
+        # 超时退出可能留下仍在恢复项目的连接；等它退出，不能叠加 Shell 回调。
+        window = None
+        pending = False
+        while True:
+            window = user.FindWindowExW(P(-3), window, None, None)
+            if not window:
+                break
+            name = C.create_unicode_buffer(256)
+            user.GetClassNameW(window, name, len(name))
+            prefix = 'WindowDock.NativeDesktop.'
+            if not name.value.startswith(prefix):
+                continue
+            owner = C.c_uint()
+            user.GetWindowThreadProcessId(window, C.byref(owner))
+            controller = name.value[len(prefix):]
+            if owner.value != explorer_pid or not controller.isdecimal():
+                continue
+            if not user.IsWindow(int(controller)):
+                user.PostMessageW(window, 0x10, 0, 0)  # 异步请求原组件恢复，不阻塞辅助进程。
+            pending = True
+        if pending:
+            raise OSError('等待上一次原生桌面连接退出')
 
     def _unhook(self):
         if self.hook:
@@ -183,6 +213,11 @@ def run_native_desktop(endpoint):
     attempts = 0
     finished = False
     native = None
+    apply_failures = 0
+    awaiting_ready = False
+    retry_apply = QTimer()
+    retry_apply.setSingleShot(True)
+    retry_apply.setInterval(500)
     reconnect = QTimer()
     reconnect.setSingleShot(True)
     reconnect.setInterval(500)
@@ -195,6 +230,7 @@ def run_native_desktop(endpoint):
         nonlocal finished
         finished = True
         reconnect.stop()
+        retry_apply.stop()
         if native:
             native.stop()
         app.quit()
@@ -204,21 +240,31 @@ def run_native_desktop(endpoint):
         stop()
 
     def apply():
+        nonlocal apply_failures, awaiting_ready
+        if finished or not native or not native.bridge:
+            return
         try:
             native.set_paths(paths)
         except OSError as error:
+            # Explorer 短暂忙碌时仅重试两次；等待期间的分类变化合并为最新路径。
+            if getattr(error, 'winerror', None) == 1460 and apply_failures < 2:
+                apply_failures += 1
+                retry_apply.start()
+                return
             fail(str(error))
+            return
+        apply_failures = 0
+        retry_apply.stop()
+        if awaiting_ready and not finished:
+            awaiting_ready = False
+            report({'ready': True})
 
     def ready():
-        nonlocal attempts
+        nonlocal attempts, awaiting_ready
         attempts = 0
+        awaiting_ready = True
         # 避开 Windows 回调重入；完成分类投递后再通知主 Dock。
-        QTimer.singleShot(0, apply_ready)
-
-    def apply_ready():
-        apply()
-        if not finished:
-            report({'ready': True})
+        QTimer.singleShot(0, apply)
 
     def start():
         nonlocal attempts
@@ -234,6 +280,9 @@ def run_native_desktop(endpoint):
                 fail(str(error))
 
     def explorer_exited():
+        nonlocal apply_failures
+        retry_apply.stop()
+        apply_failures = 0
         native.bridge = None
         native.stop()
         if not finished:
@@ -247,7 +296,7 @@ def run_native_desktop(endpoint):
             buffer[:] = rest
             message = json.loads(line)
             paths = message.get('paths', [])
-        if native and native.bridge:
+        if native and native.bridge and not retry_apply.isActive():
             apply()
 
     socket.readyRead.connect(read)
@@ -262,6 +311,7 @@ def run_native_desktop(endpoint):
         native.error.connect(fail)
         native.explorer_exited.connect(explorer_exited)
         reconnect.timeout.connect(start)
+        retry_apply.timeout.connect(apply)
         QTimer.singleShot(0, start)
         app.aboutToQuit.connect(native.stop)
         return app.exec_()
